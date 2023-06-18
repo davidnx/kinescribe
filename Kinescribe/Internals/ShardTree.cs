@@ -57,16 +57,16 @@ namespace Kinescribe.Internals
             }
 
             return builder.ToString();
-        }
 
-        private static void Append(StringBuilder builder, int indent, ShardNode node)
-        {
-            builder.Append(' ', indent);
-            builder.AppendLine(node.ShardId);
-
-            foreach (var child in node.Children)
+            static void Append(StringBuilder builder, int indent, ShardNode node)
             {
-                Append(builder, indent + 2, child);
+                builder.Append(' ', indent);
+                builder.AppendLine(node.ShardId);
+
+                foreach (var child in node.Children)
+                {
+                    Append(builder, indent + 2, child);
+                }
             }
         }
     }

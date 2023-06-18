@@ -65,7 +65,7 @@ namespace Kinescribe.Tests
             //arrange
             var iterator = Guid.NewGuid().ToString();
             var nextIterator = Guid.NewGuid().ToString();
-            var recievedSequenceNumber = string.Empty;
+            var receivedSequenceNumber = string.Empty;
             var shardId = Guid.NewGuid().ToString();
             var record = new Amazon.DynamoDBv2.Model.Record
             {
@@ -117,13 +117,13 @@ namespace Kinescribe.Tests
 
             //act
             var cts = new CancellationTokenSource(_waitTime);
-            await _subject.ExecuteAsync("app", TestTableName, x => recievedSequenceNumber = x.Dynamodb.SequenceNumber, cts.Token);
+            await _subject.ExecuteAsync("app", TestTableName, (x, _) => { receivedSequenceNumber = x.Dynamodb.SequenceNumber; return Task.CompletedTask; }, cts.Token);
 
             //assert
             A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
                 .MustHaveHappened();
 
-            recievedSequenceNumber.Should().Be(record.Dynamodb.SequenceNumber);
+            receivedSequenceNumber.Should().Be(record.Dynamodb.SequenceNumber);
             A.CallTo(() => _tracker.PutAsync(A<ShardStateDto>.That.Matches(s => s.App == "app" && s.StreamArn == TestStreamArn && s.ShardId == shardId && s.NextIterator == nextIterator && s.LastSequenceNumber == record.Dynamodb.SequenceNumber), A<CancellationToken>.Ignored)).MustHaveHappened();
             A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored)).MustHaveHappened();
             releasedLock.Should().BeTrue();
@@ -170,7 +170,7 @@ namespace Kinescribe.Tests
 
             //act
             var cts = new CancellationTokenSource(_waitTime);
-            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
+            await _subject.ExecuteAsync("app", TestTableName, (x, _) => Task.CompletedTask, cts.Token);
 
             //assert
             A.CallTo(() => _tracker.PutAsync(A<ShardStateDto>.That.Matches(s => s.App == "app" && s.StreamArn == TestStreamArn && s.ShardId == shardId && s.NextIterator == nextIterator), A<CancellationToken>.Ignored)).MustHaveHappened();
@@ -230,7 +230,7 @@ namespace Kinescribe.Tests
 
             //act
             var cts = new CancellationTokenSource(_waitTime);
-            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
+            await _subject.ExecuteAsync("app", TestTableName, (x, _) => Task.CompletedTask, cts.Token);
 
             //assert
             A.CallTo(() => _streamsClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
@@ -284,7 +284,7 @@ namespace Kinescribe.Tests
 
             //act
             var cts = new CancellationTokenSource(_waitTime);
-            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
+            await _subject.ExecuteAsync("app", TestTableName, (x, _) => Task.CompletedTask, cts.Token);
 
             //assert
             A.CallTo(() => _lockManager.AcquireLockAsync($"stream/{Uri.EscapeDataString(TestStreamArn)}/app/app/global", A<CancellationToken>.Ignored)).MustHaveHappenedOnceExactly();
@@ -355,7 +355,7 @@ namespace Kinescribe.Tests
 
             //act
             var cts = new CancellationTokenSource(_waitTime);
-            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
+            await _subject.ExecuteAsync("app", TestTableName, (x, _) => Task.CompletedTask, cts.Token);
 
             //assert
             A.CallTo(() => _streamsClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>

@@ -32,7 +32,7 @@ namespace Kinescribe.Internals
             _logger = logger ?? throw new ArgumentNullException(nameof(logger));
         }
 
-        public async Task ProcessAsync(ShardNode node, CancellationToken cancellation)
+        public async Task ProcessAsync(ShardNode node, GracefulCancellation cancellation)
         {
             _ = node ?? throw new ArgumentNullException(nameof(node));
 
@@ -67,7 +67,7 @@ namespace Kinescribe.Internals
             }
             catch (Exception ex)
             {
-                if (ex is OperationCanceledException && cancellation.IsCancellationRequested)
+                if (ex is OperationCanceledException && cancellation.StoppingToken.IsCancellationRequested)
                 {
                     // Graceful cancellation, or teardown after a failure.
                     // Allow this to bubble out, but don't report a global failure.
@@ -81,9 +81,10 @@ namespace Kinescribe.Internals
             }
         }
 
-        private async Task ProcessSingleNodeAsync(ShardNode node, CancellationToken cancellation)
+        private async Task ProcessSingleNodeAsync(ShardNode node, GracefulCancellation cancellation)
         {
-            if (_logger.IsEnabled(LogLevel.Debug))
+            _logger.LogDebug("Processing shard {shardId}", node.ShardId);
+            if (_logger.IsEnabled(LogLevel.Trace))
             {
                 var path = node.ShardId;
                 var parent = node.Parent;
@@ -93,20 +94,20 @@ namespace Kinescribe.Internals
                     parent = parent.Parent;
                 }
 
-                _logger.LogDebug("Processing shard {path}", path);
+                _logger.LogTrace("Processing shard with path {path}", path);
             }
 
             // Note: could be null if we weren't tracking this yet...
-            var shardState = await _shardStateClient.GetAsync(app: _options.AppName, streamArn: _options.StreamArn, shardId: node.ShardId, cancellation);
+            var shardState = await _shardStateClient.GetAsync(app: _options.AppName, streamArn: _options.StreamArn, shardId: node.ShardId, cancellation.StoppingToken);
 
-            while (!cancellation.IsCancellationRequested)
+            while (!cancellation.StoppingToken.IsCancellationRequested)
             {
                 // Using `long` instead of `TimeSpan` so that we can get the cmopiler to ascertain this is definiteively assigned in all code paths
                 long delayTicks;
 
                 try
                 {
-                    var batchResult = await GetBatch(node, shardState, cancellation);
+                    var batchResult = await GetBatch(node, shardState, cancellation.StoppingToken);
                     if (batchResult == null)
                     {
                         _logger.LogDebug("Shard was already finished: {shardId}", node.ShardId);
@@ -122,8 +123,14 @@ namespace Kinescribe.Internals
                     {
                         try
                         {
-                            _options.Action(record);
+                            await _options.Action(record, cancellation.StoppingToken);
                             lastSequence = record.Dynamodb.SequenceNumber;
+                        }
+                        catch (OperationCanceledException ex) when (cancellation.StoppingToken.IsCancellationRequested)
+                        {
+                            _logger.LogWarning(ex, "Consumer was canceled while processing stream record {sequenceNumber}. This shard will be retried later...", record.Dynamodb.SequenceNumber);
+                            error = true;
+                            break;
                         }
                         catch (Exception ex)
                         {
@@ -166,7 +173,7 @@ namespace Kinescribe.Internals
 
                         newState.WriteTime = DateTimeOffset.UtcNow;
                         _logger.LogTrace("Checkpointing for shard '{shardId}': {newState}", node.ShardId, newState);
-                        await _shardStateClient.PutAsync(newState, cancellation);
+                        await _shardStateClient.PutAsync(newState, cancellation.GracefulToken);
                         shardState = newState;
                     }
 
@@ -207,7 +214,7 @@ namespace Kinescribe.Internals
                         }
                     }
                 }
-                catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                catch (OperationCanceledException) when (cancellation.StoppingToken.IsCancellationRequested)
                 {
                     // Graceful shutdown...
                     throw;
@@ -220,7 +227,7 @@ namespace Kinescribe.Internals
 
                 if (delayTicks > 0)
                 {
-                    await Task.Delay(TimeSpan.FromTicks(delayTicks), cancellation);
+                    await Task.Delay(TimeSpan.FromTicks(delayTicks), cancellation.StoppingToken);
                 }
             }
         }
@@ -266,15 +273,11 @@ namespace Kinescribe.Internals
                         Limit = _options.BatchSize,
                     },
                     cancellation);
-                if (result.Records.Count > 0)
-                {
-                    _logger.LogDebug("Found {numRecords} in shard {shardId}", result.Records.Count, node.ShardId);
-                }
-                else
-                {
-                    _logger.LogTrace("Empty GetRecords results from shard {shardId}", node.ShardId);
-                }
-
+                _logger.Log(
+                    result.Records.Count > 0 ? LogLevel.Debug : LogLevel.Trace,
+                    "Got {numRecords} records from shard {shardId}",
+                    result.Records.Count,
+                    node.ShardId);
                 return (result, iterator);
             }
             catch (ExpiredIteratorException)
@@ -341,7 +344,7 @@ namespace Kinescribe.Internals
     {
         public string AppName { get; set; }
         public string StreamArn { get; set; }
-        public Action<Record> Action { get; set; }
+        public Func<Record, CancellationToken, Task> Action { get; set; }
 
         /// <summary>
         /// Invoked when <see cref="ShardNodeProcessor"/> has reached a leaf node and is about to start processing it.

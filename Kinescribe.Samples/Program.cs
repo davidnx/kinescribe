@@ -27,6 +27,14 @@ namespace Kinescribe.Samples
             var logger = loggerFactory.CreateLogger<Program>();
             logger.LogInformation("Starting...");
 
+            using var cts = new CancellationTokenSource();
+            Console.CancelKeyPress += (object? sender, ConsoleCancelEventArgs e) =>
+            {
+                logger.LogInformation("Stopping...");
+                e.Cancel = true;
+                cts.Cancel();
+            };
+
             var credentials = new EnvironmentVariablesAWSCredentials();
             var dynamoClient = new AmazonDynamoDBClient(credentials, RegionEndpoint.SAEast1);
             var streamsClient = new AmazonDynamoDBStreamsClient(credentials, RegionEndpoint.SAEast1);
@@ -41,16 +49,17 @@ namespace Kinescribe.Samples
                 });
             var subscriber = new StreamSubscriber(dynamoClient, streamsClient, options, loggerFactory);
 
-            var task = subscriber.ExecuteAsync("my-app", tableName: "dummy1", record =>
+            var task = subscriber.ExecuteAsync("my-app", tableName: "dummy1", (record, _) =>
             {
                 Console.WriteLine($"Got event {record.Dynamodb.SequenceNumber} - {record.EventName.Value}: {Document.FromAttributeMap(record.Dynamodb.NewImage).ToJson()}");
-            }, CancellationToken.None);
+                return Task.CompletedTask;
+            }, cts.Token);
 
-            await Publish(dynamoClient);
+            await Publish(dynamoClient, cts.Token);
             await task;
         }
 
-        static async Task Publish(IAmazonDynamoDB client)
+        static async Task Publish(IAmazonDynamoDB client, CancellationToken cancellation)
         {
             Console.WriteLine("Writing item...");
             await client.PutItemAsync(
@@ -61,7 +70,8 @@ namespace Kinescribe.Samples
                     {
                         { "id", new AttributeValue(Guid.NewGuid().ToString()) },
                     },
-                });
+                },
+                cancellation);
         }
     }
 }

@@ -68,7 +68,7 @@ namespace Kinescribe
             _lockManager = lockManager ?? throw new ArgumentNullException(nameof(lockManager));
         }
 
-        public async Task ExecuteAsync(string appName, string tableName, Action<Record> action, CancellationToken cancellation, int batchSize = 100)
+        public async Task ExecuteAsync(string appName, string tableName, Func<Record, CancellationToken, Task> action, CancellationToken cancellation, int batchSize = 100)
         {
             await _provisioner.ProvisionAsync(cancellation);
 
@@ -100,38 +100,39 @@ namespace Kinescribe
                     }
 
                     _logger.LogInformation("Acquired distributed lock {lockId}", lockId);
+                    using var gracefulCancellation = new GracefulCancellation(cancellation, _options.TeardownTimeout);
                     try
                     {
-                        using (var lockCts = CancellationTokenSource.CreateLinkedTokenSource(cancellation, acquisition.LockLost))
+                        using (acquisition.LockLost.Register(() =>
                         {
-                            await ExecuteCoreAsync(appName, streamArn, action, batchSize, lockCts.Token);
+                            _logger.LogWarning("Distributed lock was lost, forcefully aborting all operations");
+                            gracefulCancellation.Abort();
+                        }))
+                        {
+                            await ExecuteCoreAsync(appName, streamArn, action, batchSize, gracefulCancellation);
                         }
                     }
-                    catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+                    catch (OperationCanceledException) when (gracefulCancellation.StoppingToken.IsCancellationRequested)
                     {
-                        // Graceful shutdown...
-                    }
-                    catch (OperationCanceledException) when (acquisition.LockLost.IsCancellationRequested)
-                    {
-                        // We lost the distributed lock while executing, this is unusual but we can start over and continue...
-                        // Perhaps our machine halted for a bit and another instance picked up the work?
-                        _logger.LogWarning("Lost distributed lock {lockId}, stopped all executions and we will try again later", lockId);
+                        // Graceful shutdown or we lost the distributed lock, either way wrap up and then try again...
                     }
                     catch (Exception ex)
                     {
                         _logger.LogWarning(ex, "Outer loop failed (this could be benign). Will start over...");
-                        await Task.Delay(_options.SnoozeTime, cancellation);
+                        await Task.Delay(_options.SnoozeTime, gracefulCancellation.StoppingToken);
                     }
                     finally
                     {
-                        try
+                        if (!gracefulCancellation.GracefulToken.IsCancellationRequested)
                         {
-                            // TODO: Should we allow some extra time to release the lock even if the input cancellation is aready signaled?
-                            await acquisition.ReleaseLockAsync(cancellation);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, "Failed to release distributed lock {lockId}", lockId);
+                            try
+                            {
+                                await acquisition.ReleaseLockAsync(gracefulCancellation.GracefulToken);
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Failed to release distributed lock {lockId}", lockId);
+                            }
                         }
                     }
                 }
@@ -180,51 +181,48 @@ namespace Kinescribe
             return streamArn;
         }
 
-        private async Task ExecuteCoreAsync(string appName, string streamArn, Action<Record> action, int batchSize, CancellationToken cancellation)
+        private async Task ExecuteCoreAsync(string appName, string streamArn, Func<Record, CancellationToken, Task> action, int batchSize, GracefulCancellation cancellation)
         {
-            var shards = await ListShards(streamArn, cancellation);
+            var shards = await ListShards(streamArn, cancellation.StoppingToken);
             var tree = new ShardTree(shards);
             _logger.LogInformation("Found {numShards} shards, {numRoots} roots, {numLeaves} leaves", shards.Count, tree.Roots.Length, tree.NumLeaves);
             _logger.LogDebug("Shard tree:\n{tree}", tree);
 
-            using (var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellation))
+            int numReachedLeaf = 0;
+            var processorOptions = new ShardTreeNodeProcessorOptions
             {
-                int numReachedLeaf = 0;
-                var processorOptions = new ShardTreeNodeProcessorOptions
+                AppName = appName,
+                StreamArn = streamArn,
+                Action = action,
+                OnReachedLeaf = (node) =>
                 {
-                    AppName = appName,
-                    StreamArn = streamArn,
-                    Action = action,
-                    OnReachedLeaf = (node) =>
+                    int currentNumReachedLeaf = Interlocked.Increment(ref numReachedLeaf);
+                    _logger.LogDebug("Reached {numReachedLeaf} of {numLeaves} leaves", currentNumReachedLeaf, tree.NumLeaves);
+                    if (currentNumReachedLeaf >= tree.NumLeaves)
                     {
-                        int currentNumReachedLeaf = Interlocked.Increment(ref numReachedLeaf);
-                        _logger.LogDebug("Reached {numReachedLeaf} of {numLeaves} leaves", currentNumReachedLeaf, tree.NumLeaves);
-                        if (currentNumReachedLeaf >= tree.NumLeaves)
-                        {
-                            _logger.LogInformation("Reached all leaves ({numLeaves})", tree.NumLeaves);
-                        }
-                    },
-                    OnFailure = (node, ex) =>
-                    {
-                        if (!cts.IsCancellationRequested)
-                        {
-                            _logger.LogError(ex, "Processing failed for shard '{shardId}', aborting...", node?.ShardId);
-                            cts.Cancel();
-                        }
-                    },
-                    BatchSize = batchSize,
-                    SnoozeTime = _options.SnoozeTime,
-                    RetryCallbackSnoozeTime = _options.RetryCallbackSnoozeTime,
-                };
-                var processor = new ShardNodeProcessor(_streamsClient, _shardStateClient, processorOptions, _loggerFactory.CreateLogger<ShardNodeProcessor>());
-                var tasks = new List<Task>(tree.Roots.Length);
-                foreach (var root in tree.Roots)
+                        _logger.LogInformation("Reached all leaves ({numLeaves})", tree.NumLeaves);
+                    }
+                },
+                OnFailure = (node, ex) =>
                 {
-                    tasks.Add(processor.ProcessAsync(root, cts.Token));
-                }
-
-                await Task.WhenAll(tasks);
+                    if (!cancellation.StoppingToken.IsCancellationRequested)
+                    {
+                        _logger.LogError(ex, "Processing failed for shard '{shardId}', stopping gracefully...", node?.ShardId);
+                        cancellation.RequestStop();
+                    }
+                },
+                BatchSize = batchSize,
+                SnoozeTime = _options.SnoozeTime,
+                RetryCallbackSnoozeTime = _options.RetryCallbackSnoozeTime,
+            };
+            var processor = new ShardNodeProcessor(_streamsClient, _shardStateClient, processorOptions, _loggerFactory.CreateLogger<ShardNodeProcessor>());
+            var tasks = new List<Task>(tree.Roots.Length);
+            foreach (var root in tree.Roots)
+            {
+                tasks.Add(processor.ProcessAsync(root, cancellation));
             }
+
+            await Task.WhenAll(tasks);
         }
 
         private async Task<List<Shard>> ListShards(string streamArn, CancellationToken cancellation)

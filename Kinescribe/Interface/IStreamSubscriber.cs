@@ -7,6 +7,6 @@ namespace Kinescribe
 {
     public interface IStreamSubscriber
     {
-        Task ExecuteAsync(string appName, string streamArn, Action<Record> action, CancellationToken cancellation, int batchSize = 100);
+        Task ExecuteAsync(string appName, string streamArn, Func<Record, CancellationToken, Task> action, CancellationToken cancellation, int batchSize = 100);
     }
 }

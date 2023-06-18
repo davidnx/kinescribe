@@ -2,6 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>9</LangVersion>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
     <Description>Kinescribe is a .Net standard library for processing AWS Kinesis data streams.
 It tracks the position in each shard of your stream in DynamoDB so you don't have to worry about it.
