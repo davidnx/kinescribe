@@ -45,9 +45,19 @@ namespace Kinescribe
                 throw new InvalidOperationException($"{nameof(ShardTableName)} must be non-empty");
             }
 
+            if (LockAcquisitionInterval <= TimeSpan.Zero)
+            {
+                throw new InvalidOperationException($"{nameof(LockAcquisitionInterval)} must be positive");
+            }
+
             if (SnoozeTime <= TimeSpan.Zero)
             {
                 throw new InvalidOperationException($"{nameof(SnoozeTime)} must be positive");
+            }
+
+            if (TeardownTimeout <= TimeSpan.Zero)
+            {
+                throw new InvalidOperationException($"{nameof(TeardownTimeout)} must be positive");
             }
 
             if (ShardTableName == LockOptions.TableName)

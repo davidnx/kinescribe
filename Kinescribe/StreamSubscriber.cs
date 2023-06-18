@@ -95,7 +95,7 @@ namespace Kinescribe
                     if (!acquisition.Acquired)
                     {
                         _logger.LogInformation("Distributed lock {lockId} is taken", lockId);
-                        await Task.Delay(TimeSpan.FromSeconds(5), cancellation);
+                        await Task.Delay(_options.LockAcquisitionInterval, cancellation);
                         continue;
                     }
 
