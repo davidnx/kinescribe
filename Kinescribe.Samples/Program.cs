@@ -28,7 +28,7 @@ namespace Kinescribe.Samples
             logger.LogInformation("Starting...");
 
             using var cts = new CancellationTokenSource();
-            Console.CancelKeyPress += (object? sender, ConsoleCancelEventArgs e) =>
+            Console.CancelKeyPress += (object sender, ConsoleCancelEventArgs e) =>
             {
                 logger.LogInformation("Stopping...");
                 e.Cancel = true;
