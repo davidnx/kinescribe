@@ -165,7 +165,7 @@ namespace Kinescribe.Internals
                     {
 
                         newState.WriteTime = DateTimeOffset.UtcNow;
-                        _logger.LogDebug("Checkpointing for shard '{shardId}': {newState}", node.ShardId, newState);
+                        _logger.LogTrace("Checkpointing for shard '{shardId}': {newState}", node.ShardId, newState);
                         await _shardStateClient.PutAsync(newState, cancellation);
                         shardState = newState;
                     }
@@ -238,7 +238,7 @@ namespace Kinescribe.Internals
             string iterator;
             if (stateOrNull == null)
             {
-                _logger.LogInformation("Shard iterator isn't tracked yet for shard '{shardId}'", node.ShardId);
+                _logger.LogDebug("Shard iterator isn't tracked yet for shard '{shardId}'", node.ShardId);
                 iterator = await GetIteratorOrTrimHorizon(
                     shardId: node.ShardId,
                     iteratorType: ShardIteratorType.AT_SEQUENCE_NUMBER,
@@ -254,7 +254,7 @@ namespace Kinescribe.Internals
             else
             {
                 iterator = stateOrNull.NextIterator;
-                _logger.LogDebug("Resuming shard '{shardId}' from iterator {iterator}", node.ShardId, iterator);
+                _logger.LogTrace("Resuming shard '{shardId}' from iterator {iterator}", node.ShardId, iterator);
             }
 
             try
@@ -266,7 +266,15 @@ namespace Kinescribe.Internals
                         Limit = _options.BatchSize,
                     },
                     cancellation);
-                _logger.LogDebug("Found {numRecords} in shard {shardId}", result.Records.Count, node.ShardId);
+                if (result.Records.Count > 0)
+                {
+                    _logger.LogDebug("Found {numRecords} in shard {shardId}", result.Records.Count, node.ShardId);
+                }
+                else
+                {
+                    _logger.LogTrace("Empty GetRecords results from shard {shardId}", node.ShardId);
+                }
+
                 return (result, iterator);
             }
             catch (ExpiredIteratorException)

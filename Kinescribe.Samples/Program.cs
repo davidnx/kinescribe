@@ -21,6 +21,7 @@ namespace Kinescribe.Samples
             using var loggerFactory = LoggerFactory.Create(builder =>
             {
                 builder.AddConsole();
+                builder.SetMinimumLevel(LogLevel.Debug);
             });
 
             var logger = loggerFactory.CreateLogger<Program>();
