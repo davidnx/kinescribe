@@ -1,13 +1,12 @@
-﻿using Amazon.Kinesis.Model;
-using System;
-using System.Collections.Generic;
-using System.Text;
+﻿using System;
+using System.Threading;
 using System.Threading.Tasks;
+using Amazon.DynamoDBv2.Model;
 
-namespace Kinescribe.Interface
+namespace Kinescribe
 {
     public interface IStreamSubscriber
     {
-        Task Subscribe(string appName, string stream, Action<Record> action, int batchSize = 100);
+        Task ExecuteAsync(string appName, string streamArn, Action<Record> action, CancellationToken cancellation, int batchSize = 100);
     }
 }

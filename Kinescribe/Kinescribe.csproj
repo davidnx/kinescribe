@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>netstandard2.0</TargetFramework>
@@ -12,12 +12,18 @@ It tracks the position in each shard of your stream in DynamoDB so you don't hav
     <RepositoryType>git</RepositoryType>
     <PackageLicenseUrl>https://github.com/danielgerlag/kinescribe/blob/master/LICENSE.md</PackageLicenseUrl>
     <PackageTags>Kinesis</PackageTags>
+    <Version>2.0.0-preview</Version>
+    <AssemblyVersion>2.0.0.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="AWSSDK.DynamoDBv2" Version="3.3.17.1" />
-    <PackageReference Include="AWSSDK.Kinesis" Version="3.3.6.37" />
-    <PackageReference Include="DynamoLock" Version="1.0.2" />
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="3.7.103.19" />
+    <PackageReference Include="DynamoLock" Version="2.0.0-preview" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Kinescribe.Tests" />
+    <InternalsVisibleTo Include="DynamicProxyGenAssembly2" />
   </ItemGroup>
 
 </Project>

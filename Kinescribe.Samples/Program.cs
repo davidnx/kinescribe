@@ -1,52 +1,66 @@
 ﻿using System;
-using System.IO;
+using System.Collections.Generic;
+using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using Amazon;
-using Amazon.Kinesis;
-using Amazon.Kinesis.Model;
+using Amazon.DynamoDBv2;
+using Amazon.DynamoDBv2.DocumentModel;
+using Amazon.DynamoDBv2.Model;
 using Amazon.Runtime;
-using Kinescribe.Interface;
-using Kinescribe.Services;
-using Microsoft.Extensions.Logging.Abstractions;
+using DynamoLock;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 namespace Kinescribe.Samples
 {
     class Program
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
-            var credentials = new EnvironmentVariablesAWSCredentials();
-            IStreamSubscriber subscriber = new StreamSubscriber(credentials, RegionEndpoint.USWest2, NullLoggerFactory.Instance);
-
-            subscriber.Subscribe("my-app", "my-stream", record =>
+            using var loggerFactory = LoggerFactory.Create(builder =>
             {
-                using (var reader = new StreamReader(record.Data))
-                {
-                    Console.WriteLine($"Got event {record.SequenceNumber} - {reader.ReadToEnd()}");
-                }
+                builder.AddConsole();
             });
 
-            Publish(credentials, RegionEndpoint.USWest2, "my-stream", "hello world");
+            var logger = loggerFactory.CreateLogger<Program>();
+            logger.LogInformation("Starting...");
 
-            Console.ReadLine();
+            var credentials = new EnvironmentVariablesAWSCredentials();
+            var dynamoClient = new AmazonDynamoDBClient(credentials, RegionEndpoint.SAEast1);
+            var streamsClient = new AmazonDynamoDBStreamsClient(credentials, RegionEndpoint.SAEast1);
+            var options = Options.Create(
+                new StreamSubscriberOptions
+                {
+                    ShardTableName = "kinescribe-sample-shards",
+                    LockOptions = new DynamoDbLockOptions
+                    {
+                        TableName = "kinescribe-sample-lock",
+                    },
+                });
+            var subscriber = new StreamSubscriber(dynamoClient, streamsClient, options, loggerFactory);
+
+            var task = subscriber.ExecuteAsync("my-app", tableName: "dummy1", record =>
+            {
+                Console.WriteLine($"Got event {record.Dynamodb.SequenceNumber} - {record.EventName.Value}: {Document.FromAttributeMap(record.Dynamodb.NewImage).ToJson()}");
+            }, CancellationToken.None);
+
+            await Publish(dynamoClient);
+            await task;
         }
 
-        static async Task Publish(AWSCredentials credentials, RegionEndpoint region, string streamName, string msg)
+        static async Task Publish(IAmazonDynamoDB client)
         {
-            AmazonKinesisClient client = new AmazonKinesisClient(credentials, region);
-            using (var stream = new MemoryStream())
-            {
-                var writer = new StreamWriter(stream);
-                writer.Write(msg);
-                writer.Flush();
-
-                var response = await client.PutRecordAsync(new PutRecordRequest()
+            Console.WriteLine("Writing item...");
+            await client.PutItemAsync(
+                new PutItemRequest
                 {
-                    StreamName = streamName,
-                    PartitionKey = msg,
-                    Data = stream
+                    TableName = "dummy1",
+                    Item = new Dictionary<string, AttributeValue>
+                    {
+                        { "id", new AttributeValue(Guid.NewGuid().ToString()) },
+                    },
                 });
-            }
         }
     }
 }

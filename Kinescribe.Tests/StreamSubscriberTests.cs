@@ -1,133 +1,183 @@
-using Kinescribe.Interface;
-using Kinescribe.Services;
-using Microsoft.Extensions.Logging.Abstractions;
 using System;
-using Xunit;
-using FluentAssertions;
-using FakeItEasy;
-using System.Threading;
 using System.Collections.Generic;
-using DynamoLock;
-using Amazon.Kinesis;
-using Amazon.Kinesis.Model;
+using System.Threading;
 using System.Threading.Tasks;
+using Amazon.DynamoDBv2;
+using Amazon.DynamoDBv2.Model;
+using DynamoLock;
+using FakeItEasy;
+using FluentAssertions;
+using Kinescribe.Internals;
+using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
+using Xunit;
 
 namespace Kinescribe.Tests
 {
     public class StreamSubscriberTests
     {
-        private IStreamSubscriber _subject;
-        private IShardTracker _tracker;
+        private const string TestTableName = "table1";
+        private const string TestStreamArn = "arn:aws:dynamodb:xx-xxxx-x:xxxxxxxxxxxx:table/table1/stream/2023-06-15T12:01:02.345";
+
+        private StreamSubscriber _subject;
+        private IShardStateClient _tracker;
         private IDistributedLockManager _lockManager;
-        private IAmazonKinesis _kinesisClient;
-        private TimeSpan _waitTime = TimeSpan.FromSeconds(10);
+        private IAmazonDynamoDB _dynamoClient;
+        private IAmazonDynamoDBStreams _streamsClient;
+        private TimeSpan _waitTime = TimeSpan.FromSeconds(5);
 
         public StreamSubscriberTests()
         {
-            _kinesisClient = A.Fake<IAmazonKinesis>();
-            _tracker = A.Fake<IShardTracker>();
+            _dynamoClient = A.Fake<IAmazonDynamoDB>();
+            A.CallTo(() => _dynamoClient.DescribeTableAsync(TestTableName, A<CancellationToken>.Ignored))
+                .Returns(new DescribeTableResponse
+                {
+                    Table = new TableDescription
+                    {
+                        StreamSpecification = new StreamSpecification { StreamEnabled = true, },
+                        LatestStreamArn = TestStreamArn,
+                    },
+                });
+
+
+            _streamsClient = A.Fake<IAmazonDynamoDBStreams>();
+            _tracker = A.Fake<IShardStateClient>();
+
             _lockManager = A.Fake<IDistributedLockManager>();
-            _subject = new StreamSubscriber(_kinesisClient, _tracker, _lockManager, NullLoggerFactory.Instance);
+            A.CallTo(() => _lockManager.ExecuteAsync(A<CancellationToken>.Ignored))
+                .ReturnsLazily((CancellationToken cancellation) =>
+                {
+                    var tcs = new TaskCompletionSource();
+                    cancellation.Register(() => tcs.TrySetResult());
+                    return tcs.Task;
+                });
+
+            var options = Options.Create(new StreamSubscriberOptions());
+            var provisioner = A.Fake<IShardTableProvisioner>();
+            A.CallTo(() => provisioner.ProvisionAsync(A<CancellationToken>.Ignored))
+                .Returns(Task.CompletedTask);
+            _subject = new StreamSubscriber(_dynamoClient, _streamsClient, options, NullLoggerFactory.Instance, provisioner, _tracker, _lockManager);
         }
 
         [Fact]
-        public async void should_get_records()
+        public async Task should_get_records()
         {
             //arrange
             var iterator = Guid.NewGuid().ToString();
             var nextIterator = Guid.NewGuid().ToString();
             var recievedSequenceNumber = string.Empty;
             var shardId = Guid.NewGuid().ToString();
-            var record = new Amazon.Kinesis.Model.Record
+            var record = new Amazon.DynamoDBv2.Model.Record
             {
-                SequenceNumber = Guid.NewGuid().ToString()
+                Dynamodb = new StreamRecord
+                {
+                    SequenceNumber = Guid.NewGuid().ToString(),
+                },
             };
 
-            A.CallTo(() => _kinesisClient.ListShardsAsync(A<ListShardsRequest>.That.Matches(x => x.StreamName == "stream"), A<CancellationToken>.Ignored))
-                .Returns(new ListShardsResponse()
+            A.CallTo(() => _streamsClient.DescribeStreamAsync(A<DescribeStreamRequest>.That.Matches(x => x.StreamArn == TestStreamArn), A<CancellationToken>.Ignored))
+                .Returns(new DescribeStreamResponse()
                 {
-                    Shards = new List<Shard>()
+                    StreamDescription = new StreamDescription
                     {
-                        new Shard()
+                        Shards = new List<Shard>()
                         {
-                            ShardId = shardId
+                            new Shard()
+                            {
+                                ShardId = shardId
+                            }
                         }
-                    }
+                    },
                 });
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
                 .Returns(new GetRecordsResponse()
                 {
                     NextShardIterator = nextIterator,
-                    Records = new List<Amazon.Kinesis.Model.Record>()
+                    Records = new List<Amazon.DynamoDBv2.Model.Record>()
                     {
                         record
                     }
                 });
 
-            A.CallTo(() => _tracker.GetNextShardIterator("app", "stream", shardId))
-                .Returns(iterator);
+            A.CallTo(() => _tracker.GetAsync("app", TestStreamArn, shardId, A<CancellationToken>.Ignored))
+                .ReturnsNextFromSequence(
+                    new ShardStateDto
+                    {
+                        NextIterator = iterator,
+                    },
+                    new ShardStateDto
+                    {
+                        NextIterator = nextIterator,
+                    });
 
-            A.CallTo(() => _lockManager.AcquireLock(A<string>.Ignored))
-                .Returns(true);
+            var releasedLock = false;
+            A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored))
+                .Returns(DistributedLockAcquisition.CreateAcquired(new CancellationTokenSource(), cancellation => { releasedLock = true; return Task.CompletedTask; }));
 
             //act
-            await _subject.Subscribe("app", "stream", x => recievedSequenceNumber = x.SequenceNumber);
-            await Task.Delay(_waitTime);
+            var cts = new CancellationTokenSource(_waitTime);
+            await _subject.ExecuteAsync("app", TestTableName, x => recievedSequenceNumber = x.Dynamodb.SequenceNumber, cts.Token);
 
             //assert
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
                 .MustHaveHappened();
 
-            recievedSequenceNumber.Should().Be(record.SequenceNumber);
-            A.CallTo(() => _tracker.IncrementShardIteratorAndSequence("app", "stream", shardId, nextIterator, record.SequenceNumber)).MustHaveHappened();
-            A.CallTo(() => _lockManager.AcquireLock(A<string>.Ignored)).MustHaveHappened();
-            A.CallTo(() => _lockManager.ReleaseLock(A<string>.Ignored)).MustHaveHappened();
+            recievedSequenceNumber.Should().Be(record.Dynamodb.SequenceNumber);
+            A.CallTo(() => _tracker.PutAsync(A<ShardStateDto>.That.Matches(s => s.App == "app" && s.StreamArn == TestStreamArn && s.ShardId == shardId && s.NextIterator == nextIterator && s.LastSequenceNumber == record.Dynamodb.SequenceNumber), A<CancellationToken>.Ignored)).MustHaveHappened();
+            A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored)).MustHaveHappened();
+            releasedLock.Should().BeTrue();
         }
 
         [Fact]
-        public async void should_update_shard_iterator()
+        public async Task should_update_shard_iterator()
         {
             //arrange
             var iterator = Guid.NewGuid().ToString();
             var nextIterator = Guid.NewGuid().ToString();
             var shardId = Guid.NewGuid().ToString();
 
-            A.CallTo(() => _kinesisClient.ListShardsAsync(A<ListShardsRequest>.That.Matches(x => x.StreamName == "stream"), A<CancellationToken>.Ignored))
-                .Returns(new ListShardsResponse()
+            A.CallTo(() => _streamsClient.DescribeStreamAsync(A<DescribeStreamRequest>.That.Matches(x => x.StreamArn == TestStreamArn), A<CancellationToken>.Ignored))
+                .Returns(new DescribeStreamResponse()
                 {
-                    Shards = new List<Shard>()
+                    StreamDescription = new StreamDescription
                     {
-                        new Shard()
+                        Shards = new List<Shard>()
                         {
-                            ShardId = shardId
+                            new Shard()
+                            {
+                                ShardId = shardId
+                            }
                         }
-                    }
+                    },
                 });
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
                 .Returns(new GetRecordsResponse()
                 {
                     NextShardIterator = nextIterator,
-                    Records = new List<Amazon.Kinesis.Model.Record>()
+                    Records = new List<Amazon.DynamoDBv2.Model.Record>()
                 });
 
-            A.CallTo(() => _tracker.GetNextShardIterator("app", "stream", shardId))
-                .Returns(iterator);
+            A.CallTo(() => _tracker.GetAsync("app", TestStreamArn, shardId, A<CancellationToken>.Ignored))
+                .Returns(new ShardStateDto
+                {
+                    NextIterator = iterator,
+                });
 
-            A.CallTo(() => _lockManager.AcquireLock(A<string>.Ignored))
-                .Returns(true);
+            A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored))
+                .Returns(DistributedLockAcquisition.CreateAcquired(new CancellationTokenSource(), cancellation => Task.CompletedTask));
 
             //act
-            await _subject.Subscribe("app", "stream", x => { });
-            await Task.Delay(_waitTime);
+            var cts = new CancellationTokenSource(_waitTime);
+            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
 
             //assert
-            A.CallTo(() => _tracker.IncrementShardIterator("app", "stream", shardId, nextIterator)).MustHaveHappened();
+            A.CallTo(() => _tracker.PutAsync(A<ShardStateDto>.That.Matches(s => s.App == "app" && s.StreamArn == TestStreamArn && s.ShardId == shardId && s.NextIterator == nextIterator), A<CancellationToken>.Ignored)).MustHaveHappened();
         }
 
         [Fact]
-        public async void should_get_starting_shard_iterator_when_not_yet_tracked()
+        public async Task should_get_starting_shard_iterator_when_not_yet_tracked()
         {
             //arrange
             var startIterator = Guid.NewGuid().ToString();
@@ -135,39 +185,42 @@ namespace Kinescribe.Tests
             var shardId = Guid.NewGuid().ToString();
             var startSeqNum = Guid.NewGuid().ToString();
 
-            A.CallTo(() => _kinesisClient.ListShardsAsync(A<ListShardsRequest>.That.Matches(x => x.StreamName == "stream"), A<CancellationToken>.Ignored))
-                .Returns(new ListShardsResponse()
+            A.CallTo(() => _streamsClient.DescribeStreamAsync(A<DescribeStreamRequest>.That.Matches(x => x.StreamArn == TestStreamArn), A<CancellationToken>.Ignored))
+                .Returns(new DescribeStreamResponse()
                 {
-                    Shards = new List<Shard>()
+                    StreamDescription = new StreamDescription
                     {
-                        new Shard()
+                        Shards = new List<Shard>()
                         {
-                            ShardId = shardId,
-                            SequenceNumberRange = new SequenceNumberRange()
+                            new Shard()
                             {
-                                StartingSequenceNumber = startSeqNum
+                                ShardId = shardId,
+                                SequenceNumberRange = new SequenceNumberRange()
+                                {
+                                    StartingSequenceNumber = startSeqNum
+                                },
                             }
                         }
-                    }
+                    },
                 });
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.Ignored, A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.Ignored, A<CancellationToken>.Ignored))
                 .Returns(new GetRecordsResponse()
                 {
                     NextShardIterator = nextIterator,
-                    Records = new List<Amazon.Kinesis.Model.Record>()
+                    Records = new List<Amazon.DynamoDBv2.Model.Record>()
                 });
 
-            A.CallTo(() => _tracker.GetNextShardIterator("app", "stream", shardId))
-                .Returns(Task.FromResult<string>(null));
+            A.CallTo(() => _tracker.GetAsync("app", TestStreamArn, shardId, A<CancellationToken>.Ignored))
+                .Returns((ShardStateDto)null);
 
-            A.CallTo(() => _lockManager.AcquireLock(A<string>.Ignored))
-                .Returns(true);
+            A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored))
+                .Returns(DistributedLockAcquisition.CreateAcquired(new CancellationTokenSource(), cancellation => Task.CompletedTask));
 
-            A.CallTo(() => _kinesisClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
+            A.CallTo(() => _streamsClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
                     x.ShardId == shardId &&
-                    x.StreamName == "stream" &&
-                    x.StartingSequenceNumber == startSeqNum &&
+                    x.StreamArn == TestStreamArn &&
+                    x.SequenceNumber == startSeqNum &&
                     x.ShardIteratorType == ShardIteratorType.AT_SEQUENCE_NUMBER
                 ), A<CancellationToken>.Ignored))
                 .Returns(new GetShardIteratorResponse()
@@ -176,116 +229,123 @@ namespace Kinescribe.Tests
                 });
 
             //act
-            await _subject.Subscribe("app", "stream", x => { });
-            await Task.Delay(_waitTime);
+            var cts = new CancellationTokenSource(_waitTime);
+            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
 
             //assert
-            A.CallTo(() => _kinesisClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
+            A.CallTo(() => _streamsClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
                     x.ShardId == shardId &&
-                    x.StreamName == "stream" &&
-                    x.StartingSequenceNumber == startSeqNum &&
+                    x.StreamArn == TestStreamArn &&
+                    x.SequenceNumber == startSeqNum &&
                     x.ShardIteratorType == ShardIteratorType.AT_SEQUENCE_NUMBER
                 ), A<CancellationToken>.Ignored))
             .MustHaveHappened();
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == startIterator), A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == startIterator), A<CancellationToken>.Ignored))
                 .MustHaveHappened();
         }
 
         [Fact]
-        public async void should_lock_shard_id()
+        public async Task should_lock_shard_id()
         {
             //arrange
             var iterator = Guid.NewGuid().ToString();
             var nextIterator = Guid.NewGuid().ToString();
             var shardId = Guid.NewGuid().ToString();
 
-            A.CallTo(() => _kinesisClient.ListShardsAsync(A<ListShardsRequest>.That.Matches(x => x.StreamName == "stream"), A<CancellationToken>.Ignored))
-                .Returns(new ListShardsResponse()
+            A.CallTo(() => _streamsClient.DescribeStreamAsync(A<DescribeStreamRequest>.That.Matches(x => x.StreamArn == TestStreamArn), A<CancellationToken>.Ignored))
+                .Returns(new DescribeStreamResponse()
                 {
-                    Shards = new List<Shard>()
+                    StreamDescription = new StreamDescription
                     {
-                        new Shard()
+                        Shards = new List<Shard>()
                         {
-                            ShardId = shardId
+                            new Shard()
+                            {
+                                ShardId = shardId
+                            }
                         }
-                    }
+                    },
                 });
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == iterator), A<CancellationToken>.Ignored))
                 .Returns(new GetRecordsResponse()
                 {
                     NextShardIterator = nextIterator,
-                    Records = new List<Amazon.Kinesis.Model.Record>()
+                    Records = new List<Amazon.DynamoDBv2.Model.Record>()
                 });
 
-            A.CallTo(() => _tracker.GetNextShardIterator("app", "stream", shardId))
-                .Returns(iterator);
+            A.CallTo(() => _tracker.GetAsync("app", TestStreamArn, shardId, A<CancellationToken>.Ignored))
+                .Returns(new ShardStateDto { NextIterator = iterator });
 
-            A.CallTo(() => _lockManager.AcquireLock(A<string>.Ignored))
-                .Returns(true);
+            var releasedLock = false;
+            A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored))
+                .Returns(DistributedLockAcquisition.CreateAcquired(new CancellationTokenSource(), cancellation => { releasedLock = true; return Task.CompletedTask; }));
 
             //act
-            await _subject.Subscribe("app", "stream", x => { });
-            await Task.Delay(_waitTime);
+            var cts = new CancellationTokenSource(_waitTime);
+            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
 
             //assert
-            A.CallTo(() => _lockManager.AcquireLock($"app.stream.{shardId}")).MustHaveHappened();
-            A.CallTo(() => _lockManager.ReleaseLock($"app.stream.{shardId}")).MustHaveHappened();
+            A.CallTo(() => _lockManager.AcquireLockAsync($"stream/{Uri.EscapeDataString(TestStreamArn)}/app/app/global", A<CancellationToken>.Ignored)).MustHaveHappenedOnceExactly();
+            releasedLock.Should().BeTrue();
         }
 
         [Fact]
-        public async void should_get_new_iterator_when_expired()
+        public async Task should_get_new_iterator_when_expired()
         {
             //arrange
-            var expiredIterator = Guid.NewGuid().ToString();
-            var newIterator = Guid.NewGuid().ToString();
-            var nextIterator = Guid.NewGuid().ToString();
+            var expiredIterator = "iterator1: expired";
+            var newIterator = "iterator2: new";
+            var nextIterator = "iterator3: next";
             var shardId = Guid.NewGuid().ToString();
             var startSeqNum = Guid.NewGuid().ToString();
             var lastSeqNum = Guid.NewGuid().ToString();
 
-            A.CallTo(() => _kinesisClient.ListShardsAsync(A<ListShardsRequest>.That.Matches(x => x.StreamName == "stream"), A<CancellationToken>.Ignored))
-                .Returns(new ListShardsResponse()
+            A.CallTo(() => _streamsClient.DescribeStreamAsync(A<DescribeStreamRequest>.That.Matches(x => x.StreamArn == TestStreamArn), A<CancellationToken>.Ignored))
+                .Returns(new DescribeStreamResponse()
                 {
-                    Shards = new List<Shard>()
+                    StreamDescription = new StreamDescription
                     {
-                        new Shard()
+                        Shards = new List<Shard>()
                         {
-                            ShardId = shardId,
-                            SequenceNumberRange = new SequenceNumberRange()
+                            new Shard()
                             {
-                                StartingSequenceNumber = startSeqNum
+                                ShardId = shardId,
+                                SequenceNumberRange = new SequenceNumberRange()
+                                {
+                                    StartingSequenceNumber = startSeqNum
+                                },
                             }
                         }
-                    }
+                    },
                 });
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x =>
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x =>
                     x.ShardIterator == expiredIterator), A<CancellationToken>.Ignored))
                 .Throws(new ExpiredIteratorException(string.Empty));
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x =>
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x =>
                     x.ShardIterator == newIterator), A<CancellationToken>.Ignored))
                 .Returns(new GetRecordsResponse()
                 {
                     NextShardIterator = nextIterator,
-                    Records = new List<Amazon.Kinesis.Model.Record>()
+                    Records = new List<Amazon.DynamoDBv2.Model.Record>()
                 });
 
-            A.CallTo(() => _tracker.GetNextShardIterator("app", "stream", shardId))
-                .Returns(Task.FromResult(expiredIterator));
+            A.CallTo(() => _tracker.GetAsync("app", TestStreamArn, shardId, A<CancellationToken>.Ignored))
+                .ReturnsNextFromSequence(
+                    new ShardStateDto { NextIterator = expiredIterator, LastSequenceNumber = lastSeqNum, },
+                    new ShardStateDto { NextIterator = newIterator, }
+                );
 
-            A.CallTo(() => _tracker.GetLastSequenceNumber("app", "stream", shardId))
-                .Returns(Task.FromResult(lastSeqNum));
+            A.CallTo(() => _lockManager.AcquireLockAsync(A<string>.Ignored, A<CancellationToken>.Ignored))
+                .Returns(DistributedLockAcquisition.CreateAcquired(new CancellationTokenSource(), cancellation => Task.CompletedTask));
 
-            A.CallTo(() => _lockManager.AcquireLock(A<string>.Ignored))
-                .Returns(true);
-
-            A.CallTo(() => _kinesisClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
+            A.CallTo(() => _streamsClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
                     x.ShardId == shardId &&
-                    x.StreamName == "stream" &&
-                    x.StartingSequenceNumber == lastSeqNum &&
+                    x.StreamArn == TestStreamArn &&
+                    x.SequenceNumber == lastSeqNum &&
                     x.ShardIteratorType == ShardIteratorType.AFTER_SEQUENCE_NUMBER
                 ), A<CancellationToken>.Ignored))
                 .Returns(new GetShardIteratorResponse()
@@ -294,21 +354,20 @@ namespace Kinescribe.Tests
                 });
 
             //act
-            await _subject.Subscribe("app", "stream", x => { });
-            await Task.Delay(_waitTime);
+            var cts = new CancellationTokenSource(_waitTime);
+            await _subject.ExecuteAsync("app", TestTableName, x => { }, cts.Token);
 
             //assert
-            A.CallTo(() => _kinesisClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
+            A.CallTo(() => _streamsClient.GetShardIteratorAsync(A<GetShardIteratorRequest>.That.Matches(x =>
                     x.ShardId == shardId &&
-                    x.StreamName == "stream" &&
-                    x.StartingSequenceNumber == lastSeqNum &&
+                    x.StreamArn == TestStreamArn &&
+                    x.SequenceNumber == lastSeqNum &&
                     x.ShardIteratorType == ShardIteratorType.AFTER_SEQUENCE_NUMBER
                 ), A<CancellationToken>.Ignored))
             .MustHaveHappened();
 
-            A.CallTo(() => _kinesisClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == newIterator), A<CancellationToken>.Ignored))
+            A.CallTo(() => _streamsClient.GetRecordsAsync(A<GetRecordsRequest>.That.Matches(x => x.ShardIterator == newIterator), A<CancellationToken>.Ignored))
                 .MustHaveHappened();
         }
-
     }
 }
