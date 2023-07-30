@@ -13,8 +13,8 @@ It tracks the position in each shard of your stream in DynamoDB so you don't hav
     <RepositoryType>git</RepositoryType>
     <PackageLicenseUrl>https://github.com/danielgerlag/kinescribe/blob/master/LICENSE.md</PackageLicenseUrl>
     <PackageTags>Kinesis</PackageTags>
-    <Version>2.0.0-preview</Version>
-    <AssemblyVersion>2.0.0.0</AssemblyVersion>
+    <Version>2.0.1-preview</Version>
+    <AssemblyVersion>2.0.1.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
