@@ -22,7 +22,7 @@ namespace Kinescribe.Internals
     /// <para>
     /// Consumers should use <see cref="StoppingToken"/> to control cancellation of non-critical tasks that can be safely interrupted without harm,
     /// and should use <see cref="GracefulToken"/> for tasks that are intended to run to completion even during a graceful shutdown (e.g. graceful teardown).
-    /// While there is no guarantee such tasks leveraging <see cref="GracefulToken"/> will catualy run to completion, this provides best-effort semantics
+    /// While there is no guarantee such tasks leveraging <see cref="GracefulToken"/> will actually run to completion, this provides best-effort semantics
     /// and affords up to the configured grace period for such tasks to complete, after which they too are canceled.
     /// </para>
     /// </summary>
@@ -31,7 +31,6 @@ namespace Kinescribe.Internals
         private readonly CancellationTokenSource _stoppingCts;
         private readonly CancellationTokenSource _gracefulCts;
         private readonly CancellationTokenRegistration _registration;
-        private readonly TimeSpan _gracePeriod;
 
         private bool _disposed;
 
@@ -43,15 +42,17 @@ namespace Kinescribe.Internals
             }
 
             stoppingToken.ThrowIfCancellationRequested();
-            _gracePeriod = gracePeriod;
+            GracePeriod = gracePeriod;
 
             _stoppingCts = CancellationTokenSource.CreateLinkedTokenSource(stoppingToken);
             _gracefulCts = new CancellationTokenSource();
             _registration = _stoppingCts.Token.Register(() =>
             {
-                _gracefulCts.CancelAfter(_gracePeriod);
+                _gracefulCts.CancelAfter(GracePeriod);
             });
         }
+
+        public TimeSpan GracePeriod { get; }
 
         public void RequestStop()
         {
@@ -64,7 +65,16 @@ namespace Kinescribe.Internals
             _gracefulCts.Cancel();
         }
 
+        /// <summary>
+        /// Signaled as soon as the cancellation token passed in the constructor is signaled,
+        /// or when <see cref="RequestStop"/> or <see cref="Abort"/> is called.
+        /// </summary>
         public CancellationToken StoppingToken => _stoppingCts.Token;
+
+        /// <summary>
+        /// Signaled <see cref="GracePeriod"/> after the cancellation token passed in the constructor is signaled or <see cref="RequestStop"/> is called,
+        /// or immediately when <see cref="Abort"/> is called.
+        /// </summary>
         public CancellationToken GracefulToken => _gracefulCts.Token;
 
         public void Dispose()
@@ -89,11 +99,13 @@ namespace Kinescribe.Internals
                 }
                 finally
                 {
+                    _gracefulCts.Cancel();
                     _gracefulCts.Dispose();
                 }
             }
             finally
             {
+                _stoppingCts.Cancel();
                 _stoppingCts.Dispose();
             }
         }

@@ -214,6 +214,8 @@ namespace Kinescribe
                 BatchSize = batchSize,
                 SnoozeTime = _options.SnoozeTime,
                 RetryCallbackSnoozeTime = _options.RetryCallbackSnoozeTime,
+                MaxCheckpointLagInterval = _options.MaxCheckpointLagInterval,
+                MaxCheckpointLagRecords = _options.MaxCheckpointLagRecords,
             };
             var processor = new ShardNodeProcessor(_streamsClient, _shardStateClient, processorOptions, _loggerFactory.CreateLogger<ShardNodeProcessor>());
             var tasks = new List<Task>(tree.Roots.Length);

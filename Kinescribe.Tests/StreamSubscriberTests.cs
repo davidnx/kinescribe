@@ -52,7 +52,12 @@ namespace Kinescribe.Tests
                     return tcs.Task;
                 });
 
-            var options = Options.Create(new StreamSubscriberOptions());
+            var options = Options.Create(
+                new StreamSubscriberOptions
+                {
+                    MaxCheckpointLagInterval = TimeSpan.Zero,
+                    MaxCheckpointLagRecords = 0,
+                });
             var provisioner = A.Fake<IShardTableProvisioner>();
             A.CallTo(() => provisioner.ProvisionAsync(A<CancellationToken>.Ignored))
                 .Returns(Task.CompletedTask);

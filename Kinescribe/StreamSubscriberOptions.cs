@@ -29,6 +29,22 @@ namespace Kinescribe
         /// </summary>
         public TimeSpan RetryCallbackSnoozeTime { get; set; } = TimeSpan.FromSeconds(15);
 
+        /// <summary>
+        /// Works along with <see cref="MaxCheckpointLagRecords"/> to reduce the number of PUT calls to store stream iterators.
+        /// <see cref="StreamSubscriber"/> offers "at-least-once" processing guarantees, and these options help tune the trade-off
+        /// between (1) the likelihood of work duplications; vs. (2) the number of PUT calls to persist updated stream iterators.
+        /// Higher numbers can help reduce cost of table operations to persist iterators.
+        /// </summary>
+        public TimeSpan MaxCheckpointLagInterval { get; set; } = TimeSpan.FromMinutes(2);
+
+        /// <summary>
+        /// Works along with <see cref="MaxCheckpointLagInterval"/> to reduce the number of PUT calls to store stream iterators.
+        /// <see cref="StreamSubscriber"/> offers "at-least-once" processing guarantees, and these options help tune the trade-off
+        /// between (1) the likelihood of work duplications; vs. (2) the number of PUT calls to persist updated stream iterators.
+        /// Higher numbers can help reduce cost of table operations to persist iterators.
+        /// </summary>
+        public int MaxCheckpointLagRecords { get; set; } = 1;
+
         public CursorTableBillingMode TableBillingMode { get; set; } = CursorTableBillingMode.PayPerRequest;
 
         public void Validate()
@@ -68,6 +84,16 @@ namespace Kinescribe
             if (RetryCallbackSnoozeTime < SnoozeTime)
             {
                 throw new InvalidOperationException($"{nameof(RetryCallbackSnoozeTime)} must be greater than or equal to {nameof(SnoozeTime)} ({SnoozeTime}), found {RetryCallbackSnoozeTime}");
+            }
+
+            if (MaxCheckpointLagInterval < TimeSpan.Zero)
+            {
+                throw new InvalidOperationException($"{nameof(MaxCheckpointLagInterval)} must be non-negative");
+            }
+
+            if (MaxCheckpointLagRecords < 0)
+            {
+                throw new InvalidOperationException($"{nameof(MaxCheckpointLagRecords)} must be non-negative");
             }
         }
     }

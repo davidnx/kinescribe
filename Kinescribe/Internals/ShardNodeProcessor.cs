@@ -99,135 +99,174 @@ namespace Kinescribe.Internals
 
             // Note: could be null if we weren't tracking this yet...
             var shardState = await _shardStateClient.GetAsync(app: _options.AppName, streamArn: _options.StreamArn, shardId: node.ShardId, cancellation.StoppingToken);
+            var checkpointLagTimer = Stopwatch.StartNew();
+            long checkpointLagCounter = 0;
+            ShardStateDto unsavedNewState = null;
 
-            while (!cancellation.StoppingToken.IsCancellationRequested)
+            while (true)
             {
-                // Using `long` instead of `TimeSpan` so that we can get the cmopiler to ascertain this is definiteively assigned in all code paths
+                // Using `long` instead of `TimeSpan` so that we can get the compiler to ascertain this is definiteively assigned in all code paths
                 long delayTicks;
 
                 try
                 {
-                    var batchResult = await GetBatch(node, shardState, cancellation.StoppingToken);
-                    if (batchResult == null)
+                    try
                     {
-                        _logger.LogDebug("Shard was already finished: {shardId}", node.ShardId);
-                        return;
-                    }
-
-                    var (resp, currentIterator) = batchResult.Value;
-                    Debug.Assert(resp != null && currentIterator != null);
-
-                    string lastSequence = null;
-                    bool error = false;
-                    foreach (var record in resp.Records)
-                    {
-                        try
+                        var batchResult = await GetBatch(node, shardState, cancellation.StoppingToken);
+                        if (batchResult == null)
                         {
-                            await _options.Action(record, cancellation.StoppingToken);
-                            lastSequence = record.Dynamodb.SequenceNumber;
+                            _logger.LogDebug("Shard was already finished: {shardId}", node.ShardId);
+                            return;
                         }
-                        catch (OperationCanceledException ex) when (cancellation.StoppingToken.IsCancellationRequested)
-                        {
-                            _logger.LogWarning(ex, "Consumer was canceled while processing stream record {sequenceNumber}. This shard will be retried later...", record.Dynamodb.SequenceNumber);
-                            error = true;
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogWarning(ex, "Consumer encountered an error processing stream record {sequenceNumber}. This shard will be retried later...", record.Dynamodb.SequenceNumber);
-                            error = true;
-                            break;
-                        }
-                    }
 
-                    ShardStateDto newState = null;
-                    if (error)
-                    {
-                        // Checkpoint only the progress we made, if any...
-                        if (lastSequence != null)
+                        var (resp, currentIterator) = batchResult.Value;
+                        Debug.Assert(resp != null && currentIterator != null);
+
+                        string lastSequence = null;
+                        bool error = false;
+                        foreach (var record in resp.Records)
+                        {
+                            try
+                            {
+                                await _options.Action(record, cancellation.StoppingToken);
+                                lastSequence = record.Dynamodb.SequenceNumber;
+                                checkpointLagCounter++;
+                            }
+                            catch (OperationCanceledException ex) when (cancellation.StoppingToken.IsCancellationRequested)
+                            {
+                                _logger.LogWarning(ex, "Consumer was canceled while processing stream record {sequenceNumber}. This shard will be retried later...", record.Dynamodb.SequenceNumber);
+                                error = true;
+                                break;
+                            }
+                            catch (Exception ex)
+                            {
+                                _logger.LogWarning(ex, "Consumer encountered an error processing stream record {sequenceNumber}. This shard will be retried later...", record.Dynamodb.SequenceNumber);
+                                error = true;
+                                break;
+                            }
+                        }
+
+                        ShardStateDto newState = null;
+                        if (error)
+                        {
+                            // Checkpoint only the progress we made, if any...
+                            if (lastSequence != null)
+                            {
+                                newState = new ShardStateDto
+                                {
+                                    App = _options.AppName,
+                                    StreamArn = _options.StreamArn,
+                                    ShardId = node.ShardId,
+                                    NextIterator = currentIterator,
+                                    LastSequenceNumber = lastSequence ?? shardState?.LastSequenceNumber,
+                                };
+                            }
+                        }
+                        else
                         {
                             newState = new ShardStateDto
                             {
                                 App = _options.AppName,
                                 StreamArn = _options.StreamArn,
                                 ShardId = node.ShardId,
-                                NextIterator = currentIterator,
+                                NextIterator = resp.NextShardIterator,
                                 LastSequenceNumber = lastSequence ?? shardState?.LastSequenceNumber,
                             };
                         }
-                    }
-                    else
-                    {
-                        newState = new ShardStateDto
-                        {
-                            App = _options.AppName,
-                            StreamArn = _options.StreamArn,
-                            ShardId = node.ShardId,
-                            NextIterator = resp.NextShardIterator,
-                            LastSequenceNumber = lastSequence ?? shardState?.LastSequenceNumber,
-                        };
-                    }
 
-                    if (newState != null)
-                    {
-
-                        newState.WriteTime = DateTimeOffset.UtcNow;
-                        _logger.LogTrace("Checkpointing for shard '{shardId}': {newState}", node.ShardId, newState);
-                        await _shardStateClient.PutAsync(newState, cancellation.GracefulToken);
-                        shardState = newState;
-                    }
-
-                    if (error)
-                    {
-                        delayTicks = _options.RetryCallbackSnoozeTime.Ticks;
-                    }
-                    else
-                    {
-                        if (string.IsNullOrEmpty(resp.NextShardIterator))
+                        if (newState != null)
                         {
-                            _logger.LogInformation("Shard is finished: {shardId}", node.ShardId);
-                            return;
-                        }
-
-                        if (node.Children.Length > 0)
-                        {
-                            // This shard must be closed (since it has children), so it is safe to continue iterating as quickly as possible so we get past it...
-                            delayTicks = 0;
-                        }
-                        else
-                        {
-                            if (resp.Records.Count == 0)
+                            if (string.IsNullOrEmpty(resp.NextShardIterator) ||// finished this shard
+                                checkpointLagTimer.Elapsed >= _options.MaxCheckpointLagInterval ||
+                                checkpointLagCounter >= _options.MaxCheckpointLagRecords)
                             {
-                                // TODO: Maybe we aren't done on this shard, how do we know?
-                                // Delaying _options.SnoozeTime between calls could lead to very long delays until we are synced up again...
-                                //
-                                // See: https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html:
-                                //    > If there are no stream records available in the portion of the shard that the iterator points to,
-                                //    > GetRecords returns an empty list. Note that it might take multiple calls
-                                //    > to get to a portion of the shard that contains stream records.
-                                delayTicks = _options.SnoozeTime.Ticks;
+                                // NOTE: Reset to null here, before attempting to actually save, so we don't end up retrying during a graceful shutdown below.
+                                // The intent of saving on shutdown isn't to retry a failed save, rather as a best effort attempt to save once during graceful teardown.
+                                unsavedNewState = null;
+
+                                newState.WriteTime = DateTimeOffset.UtcNow;
+                                _logger.LogTrace("Checkpointing for shard '{shardId}': {newState}", node.ShardId, newState);
+                                await _shardStateClient.PutAsync(newState, cancellation.GracefulToken);
+
+                                checkpointLagTimer.Restart();
+                                checkpointLagCounter = 0;
                             }
                             else
                             {
+                                unsavedNewState = newState;
+                            }
+
+                            // Need to update shardState for next iteration even if we didn't persist it yet...
+                            shardState = newState;
+                        }
+
+                        if (error)
+                        {
+                            delayTicks = _options.RetryCallbackSnoozeTime.Ticks;
+                        }
+                        else
+                        {
+                            if (string.IsNullOrEmpty(resp.NextShardIterator))
+                            {
+                                _logger.LogInformation("Shard is finished: {shardId}", node.ShardId);
+                                return;
+                            }
+
+                            if (node.Children.Length > 0)
+                            {
+                                // This shard must be closed (since it has children), so it is safe to continue iterating as quickly as possible so we get past it...
                                 delayTicks = 0;
+                            }
+                            else
+                            {
+                                if (resp.Records.Count == 0)
+                                {
+                                    // TODO: Maybe we aren't done on this shard, how do we know?
+                                    // Delaying _options.SnoozeTime between calls could lead to very long delays until we are synced up again...
+                                    //
+                                    // See: https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html:
+                                    //    > If there are no stream records available in the portion of the shard that the iterator points to,
+                                    //    > GetRecords returns an empty list. Note that it might take multiple calls
+                                    //    > to get to a portion of the shard that contains stream records.
+                                    delayTicks = _options.SnoozeTime.Ticks;
+                                }
+                                else
+                                {
+                                    delayTicks = 0;
+                                }
                             }
                         }
                     }
-                }
-                catch (OperationCanceledException) when (cancellation.StoppingToken.IsCancellationRequested)
-                {
-                    // Graceful shutdown...
-                    throw;
-                }
-                catch (Exception ex)
-                {
-                    delayTicks = _options.RetryCallbackSnoozeTime.Ticks;
-                    _logger.LogError(ex, $"{nameof(ProcessSingleNodeAsync)} iteration failed");
-                }
+                    catch (OperationCanceledException) when (cancellation.StoppingToken.IsCancellationRequested)
+                    {
+                        // Graceful shutdown...
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        delayTicks = _options.RetryCallbackSnoozeTime.Ticks;
+                        _logger.LogError(ex, $"{nameof(ProcessSingleNodeAsync)} iteration failed");
+                    }
 
-                if (delayTicks > 0)
+                    if (delayTicks > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromTicks(delayTicks), cancellation.StoppingToken);
+                    }
+                }
+                finally
                 {
-                    await Task.Delay(TimeSpan.FromTicks(delayTicks), cancellation.StoppingToken);
+                    if (cancellation.StoppingToken.IsCancellationRequested)
+                    {
+                        if (unsavedNewState != null)
+                        {
+                            unsavedNewState.WriteTime = DateTimeOffset.UtcNow;
+                            _logger.LogDebug("Checkpointing shard '{shardId}' on teardown: {newState}", node.ShardId, unsavedNewState);
+                            await _shardStateClient.PutAsync(unsavedNewState, cancellation.GracefulToken);
+                        }
+
+                        cancellation.StoppingToken.ThrowIfCancellationRequested();
+                        throw new InvalidOperationException("Unreachable code");
+                    }
                 }
             }
         }
@@ -361,5 +400,15 @@ namespace Kinescribe.Internals
         public TimeSpan SnoozeTime { get; set; } = TimeSpan.FromSeconds(3);
         public TimeSpan RetryCallbackSnoozeTime { get; set; } = TimeSpan.FromSeconds(15);
         public int BatchSize { get; set; } = 100;
+
+        /// <summary>
+        /// See <see cref="StreamSubscriberOptions.MaxCheckpointLagInterval"/>.
+        /// </summary>
+        public TimeSpan MaxCheckpointLagInterval { get; set; }
+
+        /// <summary>
+        /// See <see cref="StreamSubscriberOptions.MaxCheckpointLagRecords"/>.
+        /// </summary>
+        public int MaxCheckpointLagRecords { get; set; }
     }
 }
