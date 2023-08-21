@@ -48,7 +48,7 @@ namespace Kinescribe.Internals
                 {
                     // TODO: Only refresh children for this shard instead of forcing everything to start over??
                     _logger.LogWarning($"Reached end of leaf shard '{node.ShardId}'. This likely means the shard topology changed and new children were added, so we should update the list of shards");
-                    throw new InvalidOperationException($"Reached end of leaf shard {node.ShardId}, shard list has to be refreshed");
+                    throw new BenignStartOverException($"Reached end of leaf shard {node.ShardId}, shard list has to be refreshed");
                 }
                 else
                 {

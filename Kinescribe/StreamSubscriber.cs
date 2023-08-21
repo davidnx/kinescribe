@@ -118,8 +118,15 @@ namespace Kinescribe
                     }
                     catch (Exception ex)
                     {
-                        _logger.LogWarning(ex, "Outer loop failed (this could be benign). Will start over...");
-                        await Task.Delay(_options.SnoozeTime, gracefulCancellation.StoppingToken);
+                        if (ex is BenignStartOverException benignEx)
+                        {
+                            _logger.LogInformation("Outer loop iteration terminated: {message}. Will start over...", benignEx.Message);
+                        }
+                        else
+                        {
+                            _logger.LogWarning(ex, "Outer loop failed (this could be benign). Will start over...");
+                            await Task.Delay(_options.SnoozeTime, gracefulCancellation.StoppingToken);
+                        }
                     }
                     finally
                     {
@@ -128,6 +135,10 @@ namespace Kinescribe
                             try
                             {
                                 await acquisition.ReleaseLockAsync(gracefulCancellation.GracefulToken);
+                            }
+                            catch (OperationCanceledException ex) when (gracefulCancellation.GracefulToken.IsCancellationRequested)
+                            {
+                                _logger.LogWarning(ex, "Unable to release distributed lock {lockId} within the graceful iteration teardown period", lockId);
                             }
                             catch (Exception ex)
                             {
@@ -207,7 +218,11 @@ namespace Kinescribe
                 {
                     if (!cancellation.StoppingToken.IsCancellationRequested)
                     {
-                        _logger.LogError(ex, "Processing failed for shard '{shardId}', stopping gracefully...", node?.ShardId);
+                        if (ex is not BenignStartOverException)
+                        {
+                            _logger.LogError(ex, "Processing failed for shard '{shardId}', stopping gracefully...", node?.ShardId);
+                        }
+
                         cancellation.RequestStop();
                     }
                 },
