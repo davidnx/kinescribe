@@ -12,8 +12,13 @@ namespace Kinescribe
 
         public string ShardTableName { get; set; } = "kinescribe_shards";
 
-        // How frequently we should try to acquire the global distribute lock. Each instance tries to acquire the lock this often...
-        public TimeSpan LockAcquisitionInterval { get; set; } = TimeSpan.FromSeconds(5);
+        /// <summary>
+        /// How frequently we should try to acquire the global distribute lock.
+        /// Each instance tries to acquire the lock this often when it doesn't own the lock.
+        /// This, along with <see cref="LockOptions.LeaseTime"/>, effectively controls the upper bound of
+        /// how long it will take for a new primary to take over processing the stream if the previous primary crashes.
+        /// </summary>
+        public TimeSpan LockAcquisitionInterval { get; set; } = TimeSpan.FromSeconds(15);
 
         public TimeSpan SnoozeTime { get; set; } = TimeSpan.FromSeconds(3);
 
@@ -24,7 +29,7 @@ namespace Kinescribe
         public TimeSpan TeardownTimeout { get; set;} = TimeSpan.FromSeconds(5);
 
         /// <summary>
-        /// How long to wait before trying the same shard again after a failureoccurred when the subscribed action failed.
+        /// How long to wait before trying the same shard again after a failure occurred when the subscribed action failed.
         /// The subscribed action will continue to be called periodically with approximately this interval until it succeeds.
         /// </summary>
         public TimeSpan RetryCallbackSnoozeTime { get; set; } = TimeSpan.FromSeconds(15);
@@ -32,7 +37,7 @@ namespace Kinescribe
         /// <summary>
         /// Works along with <see cref="MaxCheckpointLagRecords"/> to reduce the number of PUT calls to store stream iterators.
         /// <see cref="StreamSubscriber"/> offers "at-least-once" processing guarantees, and these options help tune the trade-off
-        /// between (1) the likelihood of work duplications; vs. (2) the number of PUT calls to persist updated stream iterators.
+        /// between (1) the likelihood of work duplication; vs. (2) the number of PUT calls to persist updated stream iterators.
         /// Higher numbers can help reduce cost of table operations to persist iterators.
         /// </summary>
         public TimeSpan MaxCheckpointLagInterval { get; set; } = TimeSpan.FromMinutes(2);

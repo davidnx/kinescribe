@@ -94,7 +94,7 @@ namespace Kinescribe
                     var acquisition = await _lockManager.AcquireLockAsync(lockId, cancellation);
                     if (!acquisition.Acquired)
                     {
-                        _logger.LogInformation("Distributed lock {lockId} is taken", lockId);
+                        _logger.LogDebug("Distributed lock {lockId} is taken", lockId);
                         await Task.Delay(_options.LockAcquisitionInterval, cancellation);
                         continue;
                     }
