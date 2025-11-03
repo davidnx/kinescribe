@@ -15,5 +15,10 @@ namespace Kinescribe.Internals
         public ShardNode[] Children { get; set; }
 
         public string ShardId => Shard.ShardId;
+
+        public override string ToString()
+        {
+            return $"ShardNode (Id={Shard.ShardId}, StartingSequenceNumber={Shard.SequenceNumberRange.StartingSequenceNumber}, EndingSequenceNumber={Shard.SequenceNumberRange.EndingSequenceNumber}, ParentShardId={Shard.ParentShardId})";
+        }
     }
 }

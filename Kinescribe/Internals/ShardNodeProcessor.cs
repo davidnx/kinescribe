@@ -149,7 +149,7 @@ namespace Kinescribe.Internals
                         ShardStateDto newState = null;
                         if (error)
                         {
-                            // Checkpoint only the progress we made, if any...
+                            // Checkpoint the progress we made, but only if we made any progress...
                             if (lastSequence != null)
                             {
                                 newState = new ShardStateDto
@@ -158,7 +158,7 @@ namespace Kinescribe.Internals
                                     StreamArn = _options.StreamArn,
                                     ShardId = node.ShardId,
                                     NextIterator = currentIterator,
-                                    LastSequenceNumber = lastSequence ?? shardState?.LastSequenceNumber,
+                                    LastSequenceNumber = lastSequence,
                                 };
                             }
                         }
@@ -170,7 +170,7 @@ namespace Kinescribe.Internals
                                 StreamArn = _options.StreamArn,
                                 ShardId = node.ShardId,
                                 NextIterator = resp.NextShardIterator,
-                                LastSequenceNumber = lastSequence ?? shardState?.LastSequenceNumber,
+                                LastSequenceNumber = lastSequence ?? shardState?.LastSequenceNumber, // This could end up null if we are processing a shard that hasn't received any items yet; that's okay
                             };
                         }
 
@@ -322,18 +322,24 @@ namespace Kinescribe.Internals
             catch (ExpiredIteratorException)
             {
                 var lastSequence = stateOrNull?.LastSequenceNumber;
-                if (string.IsNullOrEmpty(lastSequence))
+                if (!string.IsNullOrEmpty(lastSequence))
                 {
-                    throw new InvalidOperationException($"Encountered {nameof(ExpiredIteratorException)} while accessing an iterator we had just created for shard '{node.ShardId}'. Aborting current execution, starting over should help.");
+                    _logger.LogInformation($"Encountered {nameof(ExpiredIteratorException)} for shard '{{shardId}}'. Retrying with lastSequence '{{lastSequence}}'", node.ShardId, lastSequence);
+                    iterator = await GetIteratorOrTrimHorizon(
+                        shardId: node.ShardId,
+                        iteratorType: ShardIteratorType.AFTER_SEQUENCE_NUMBER,
+                        sequenceNumber: lastSequence,
+                        cancellation);
                 }
-
-                _logger.LogInformation($"Encountered {nameof(ExpiredIteratorException)} for shard '{{shardId}}'. Retrying with lastSequence '{{lastSequence}}'", node.ShardId, lastSequence);
-
-                iterator = await GetIteratorOrTrimHorizon(
-                    shardId: node.ShardId,
-                    iteratorType: ShardIteratorType.AFTER_SEQUENCE_NUMBER,
-                    sequenceNumber: lastSequence,
-                    cancellation);
+                else
+                {
+                    _logger.LogInformation($"Encountered {nameof(ExpiredIteratorException)} for shard '{{shardId}}' that we had not commited consumed items from yet. Retrying from the beginning of the shard", node.ShardId);
+                    iterator = await GetIteratorOrTrimHorizon(
+                        shardId: node.ShardId,
+                        iteratorType: ShardIteratorType.AT_SEQUENCE_NUMBER,
+                        sequenceNumber: node.Shard.SequenceNumberRange.StartingSequenceNumber,
+                        cancellation);
+                }
 
                 var result = await _streamsClient.GetRecordsAsync(
                     new GetRecordsRequest()
