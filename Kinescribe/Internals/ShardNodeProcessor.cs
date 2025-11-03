@@ -212,28 +212,22 @@ namespace Kinescribe.Internals
                                 return;
                             }
 
-                            if (node.Children.Length > 0)
+                            if (resp.Records.Count > 0 ||
+                                //
+                                // Even if we got zero records but this shard is closed, then we should continue to GetRecords as fast as we can until we reach the end.
+                                // We know the shard is closed when it has a EndingSequenceNumber specified.
+                                // See: https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html:
+                                //    > If there are no stream records available in the portion of the shard that the iterator points to,
+                                //    > GetRecords returns an empty list. Note that it might take multiple calls
+                                //    > to get to a portion of the shard that contains stream records.
+                                !string.IsNullOrEmpty(node.Shard.SequenceNumberRange.EndingSequenceNumber))
                             {
-                                // This shard must be closed (since it has children), so it is safe to continue iterating as quickly as possible so we get past it...
                                 delayTicks = 0;
                             }
                             else
                             {
-                                if (resp.Records.Count == 0)
-                                {
-                                    // TODO: Maybe we aren't done on this shard, how do we know?
-                                    // Delaying _options.SnoozeTime between calls could lead to very long delays until we are synced up again...
-                                    //
-                                    // See: https://docs.aws.amazon.com/amazondynamodb/latest/APIReference/API_streams_GetRecords.html:
-                                    //    > If there are no stream records available in the portion of the shard that the iterator points to,
-                                    //    > GetRecords returns an empty list. Note that it might take multiple calls
-                                    //    > to get to a portion of the shard that contains stream records.
-                                    delayTicks = _options.SnoozeTime.Ticks;
-                                }
-                                else
-                                {
-                                    delayTicks = 0;
-                                }
+                                // We are caught up, delay before the next round otherwise this would get expensive...
+                                delayTicks = _options.SnoozeTime.Ticks;
                             }
                         }
                     }
