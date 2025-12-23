@@ -1,5 +1,5 @@
 ﻿using System;
-using Amazon.DynamoDBv2.Model;
+using Amazon.DynamoDBStreams.Model;
 
 namespace Kinescribe.Internals
 {

@@ -3,8 +3,8 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Threading;
 using System.Threading.Tasks;
-using Amazon.DynamoDBv2;
-using Amazon.DynamoDBv2.Model;
+using Amazon.DynamoDBStreams;
+using Amazon.DynamoDBStreams.Model;
 using Microsoft.Extensions.Logging;
 
 namespace Kinescribe.Internals

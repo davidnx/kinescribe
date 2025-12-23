@@ -13,13 +13,14 @@ It tracks the position in each shard of your stream in DynamoDB so you don't hav
     <RepositoryType>git</RepositoryType>
     <PackageLicenseUrl>https://github.com/danielgerlag/kinescribe/blob/master/LICENSE.md</PackageLicenseUrl>
     <PackageTags>Kinesis</PackageTags>
-    <Version>2.0.4-preview</Version>
-    <AssemblyVersion>2.0.4.0</AssemblyVersion>
+    <Version>2.0.5-preview</Version>
+    <AssemblyVersion>2.0.5.0</AssemblyVersion>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="AWSSDK.DynamoDBv2" Version="3.7.103.19" />
-    <PackageReference Include="DynamoLock" Version="2.0.0-preview" />
+    <PackageReference Include="AWSSDK.DynamoDBv2" Version="4.0.10.4" />
+    <PackageReference Include="AWSSDK.DynamoDBStreams" Version="4.0.4.9" />
+    <PackageReference Include="DynamoLock" Version="2.0.1-preview" />
   </ItemGroup>
 
   <ItemGroup>

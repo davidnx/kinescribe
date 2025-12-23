@@ -5,12 +5,12 @@ using System.Threading;
 using System.Threading.Tasks;
 using Amazon;
 using Amazon.DynamoDBv2;
-using Amazon.DynamoDBv2.DocumentModel;
-using Amazon.DynamoDBv2.Model;
 using Amazon.Runtime;
 using DynamoLock;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Amazon.DynamoDBv2.Model;
+using Amazon.DynamoDBStreams;
 
 namespace Kinescribe.Samples
 {
@@ -51,7 +51,7 @@ namespace Kinescribe.Samples
 
             var task = subscriber.ExecuteAsync("my-app", tableName: "dummy1", (record, _) =>
             {
-                Console.WriteLine($"Got event {record.Dynamodb.SequenceNumber} - {record.EventName.Value}: {Document.FromAttributeMap(record.Dynamodb.NewImage).ToJson()}");
+                Console.WriteLine($"Got event {record.Dynamodb.SequenceNumber} - {record.EventName.Value}: {JsonSerializer.Serialize(record.Dynamodb.NewImage)}");
                 return Task.CompletedTask;
             }, cts.Token);
 
@@ -68,7 +68,7 @@ namespace Kinescribe.Samples
                     TableName = "dummy1",
                     Item = new Dictionary<string, AttributeValue>
                     {
-                        { "id", new AttributeValue(Guid.NewGuid().ToString()) },
+                        { "id", new AttributeValue { S=Guid.NewGuid().ToString() } },
                     },
                 },
                 cancellation);
